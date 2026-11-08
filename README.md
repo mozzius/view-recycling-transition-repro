@@ -1,17 +1,79 @@
-# React Native Reproducer
+# Android view recycling reuses a view that still has a parent
 
-> [!IMPORTANT]  
-> Do not just **fork** this repository, but use instead the [![Use this template](https://img.shields.io/badge/-Use%20this%20template-brightgreen)](https://github.com/cortinico/reproducer-react-native/generate) button on GitHub.
+With `enableViewRecycling` on, `ViewManager.onDropViewInstance` pools a view
+even when `view.getParent() != null`. A view keeps its parent after removal when
+the parent called `ViewGroup.startViewTransition(child)` first, as exit
+animations do. If that parent leaves the window before it calls
+`endViewTransition`, `ViewGroup.dispatchDetachedFromWindow` empties its
+disappearing children but leaves the child's parent set, and nothing can clear
+it after that. When the pool hands that view out again, `addViewAt` crashes with
+"The specified child already has a parent".
 
-This is the React Native **reproducer** template. 
+[react/react-native#59776](https://github.com/react/react-native/pull/59776)
+doesn't help here: its `endViewTransition` call only clears the parent while the
+old parent still lists the view as a disappearing child.
 
-You can use this template to create a minimal, complete, and reproducible project that the community can use to understand what's your problem. You can read more about the principles of a good reproducible project [here](https://stackoverflow.com/help/mcve).
+[`TransitionContainer`](ReproducerApp/android/app/src/main/java/com/reproducerapp/TransitionContainer.kt)
+is a small native container that keeps a removed child drawn for a 1 second exit
+animation, like react-native-screens does for a screen that is popped.
 
-This template is up to date with `react-native@latest` as you can find it on [npm](https://www.npmjs.com/package/react-native/v/latest).
+- react-native `0.90.0-nightly-20261108-f480836ad` (`main` at `f480836ad`,
+  which includes #59776), New Architecture, Hermes
+- Android emulator, API 36
 
-## How to use this repository
+## Run it
 
-1. Click on [![Use this template](https://img.shields.io/badge/-Use%20this%20template-brightgreen)](https://github.com/cortinico/reproducer-react-native/generate) button to create a new repository starting from this one.
-2. Git clone your repository locally.
-3. Edit the project to reproduce the failure you're seeing.
-4. Push your changes, so that Github Actions can run the CI.
+```sh
+cd ReproducerApp
+yarn install
+yarn android --mode release   # or `yarn android` for a debug build with Metro
+```
+
+## Steps
+
+Press **Run**. It:
+
+1. removes the red view from `TransitionContainer`, which starts its exit
+   animation,
+2. 300 ms later, removes `TransitionContainer`,
+3. 300 ms later, mounts ten new views.
+
+The switch at the top turns `enableViewRecycling` on or off and restarts the
+app. It's on by default.
+
+**Recycling on:** the release build crashes (a debug build shows the same error
+in a redbox). The first new view is the red view from step 1, taken from the
+pool with `TransitionContainer` still set as its parent:
+
+```
+E SurfaceMountingManager: java.lang.IllegalStateException: addViewAt: cannot insert view [54] into parent [1]: View already has a parent: [24] Parent: TransitionContainer View: ReactViewGroup
+E AndroidRuntime: FATAL EXCEPTION: main
+E AndroidRuntime: java.lang.IllegalStateException: addViewAt: failed to insert view [54] into parent [1] at index 13
+    at com.facebook.react.fabric.mounting.SurfaceMountingManager.addViewAt(SurfaceMountingManager.kt:376)
+    at com.facebook.react.fabric.mounting.mountitems.IntBufferBatchMountItem.execute(IntBufferBatchMountItem.kt:122)
+    ...
+Caused by: java.lang.IllegalStateException: The specified child already has a parent. You must call removeView() on the child's parent first.
+    at android.view.ViewGroup.addViewInner(ViewGroup.java:5289)
+    at android.view.ViewGroup.addView(ViewGroup.java:5118)
+    at android.view.ViewGroup.addView(ViewGroup.java:5058)
+    at com.facebook.react.uimanager.ViewGroupManager.addView(ViewGroupManager.kt:29)
+    at com.facebook.react.uimanager.ViewGroupManager.addView(ViewGroupManager.kt:15)
+    at com.facebook.react.fabric.mounting.SurfaceMountingManager.addViewAt(SurfaceMountingManager.kt:373)
+```
+
+**Recycling off:** ten green squares appear. Once the exit animation ends,
+`TransitionContainer` logs that `endViewTransition` left the parent set:
+
+```
+D TransitionContainer: exit animation of view 22 ended, attached to window: false, its parent is com.reproducerapp.TransitionContainer{...}
+```
+
+## Fix
+
+In `ViewManager.onDropViewInstance`, don't pool a view that still has a parent:
+
+```java
+if (view.getParent() != null) {
+  return;
+}
+```
