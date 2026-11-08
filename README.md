@@ -13,6 +13,8 @@ it after that. When the pool hands that view out again, `addViewAt` crashes with
 doesn't help here: its `endViewTransition` call only clears the parent while the
 old parent still lists the view as a disappearing child.
 
+Filed as [react/react-native#59863](https://github.com/react/react-native/issues/59863).
+
 [`TransitionContainer`](ReproducerApp/android/app/src/main/java/com/reproducerapp/TransitionContainer.kt)
 is a small native container that keeps a removed child drawn for a 1 second exit
 animation, like react-native-screens does for a screen that is popped.
